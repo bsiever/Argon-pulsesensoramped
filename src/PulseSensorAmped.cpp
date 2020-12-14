@@ -105,8 +105,7 @@ void PulseSensorAmpedClass::stop(void) {
 
 
 void PulseSensorAmpedClass::update() {              // Update this ever 2ms
-  static int rate[10];                         // array to average IBI values for average rate
-  static int amplitudes[10];                   // array to average amplitude values for average rate
+  static unsigned rate[10];                         // array to average IBI values for average rate
   static unsigned beatCount = 0;
 
   if(fakeData) {
@@ -125,17 +124,23 @@ void PulseSensorAmpedClass::update() {              // Update this ever 2ms
     return;
   }
 
-  int signal;  
+  static unsigned int signalFilter[5];
+  static unsigned int filterIndex = 0;
+  signalFilter[filterIndex] =  HAL_ADC_Read(analogPin);
+  filterIndex = (filterIndex+1)%5;
+  int signal = (signalFilter[0] + signalFilter[1] + signalFilter[2] + signalFilter[3] + signalFilter[4])/5;
 
-  signal = HAL_ADC_Read(analogPin);            // read the Pulse Sensor 
   sampleCounter += 2;                          // keep track of the time in mS with this variable
 
+  // For debugging of signal
+  // Serial.printf("%d,%d,%d,%d,%d\n",signal,peak,trough,thresh, postUpdate?2000:1000);
+  //Serial.printf("%d\n",thresh-trough);
   unsigned elapsedTime = sampleCounter - lastBeatTime;  // Time passed since the last beat
-  boolean beyondDichrotic = elapsedTime > (IBI/5)*3;    // Has sufficient time passed to avoid the dichrotic noise?
+  boolean beyondDicrotic = elapsedTime > (IBI/5)*3;    // Has sufficient time passed to avoid the dichrotic noise?
  
   //  find the peak and trough of the pulse wave
   if(signal < thresh) {         // Update trough based on threshold
-    if(beyondDichrotic) {       // avoid dichrotic noise when finding trough
+    if(beyondDicrotic) {       // avoid dicrotic noise when finding trough
       trough = min(signal, trough);
     } 
   } else {                      // Signal is > threshold;  Potentially update peak
@@ -144,9 +149,8 @@ void PulseSensorAmpedClass::update() {              // Update this ever 2ms
 
   // Search for a beat
   if(elapsedTime > 250){                         // Assume at least 250ms between beats (i.e., BPM<240); Helps avoid noise
-
     // See if the signal indicates the beginning of a pulse phase
-    if((signal > thresh) && (pulse == false) && beyondDichrotic){        
+    if((signal > thresh) && (pulse == false) && beyondDicrotic) {        
       // A pulse phase has started 
       pulse = true;
 
@@ -155,7 +159,6 @@ void PulseSensorAmpedClass::update() {              // Update this ever 2ms
 
       // Add the count to the buffer
       rate[beatCount%10] = IBI;
-      amplitudes[beatCount%10] = amplitude;
 
       // Assuming this won't roll over (4Billion beats?)
       beatCount++;
@@ -166,26 +169,17 @@ void PulseSensorAmpedClass::update() {              // Update this ever 2ms
       } else if(beatCount==3) {
         // First measurement is iffy. Average 2nd and 3rd
         rate[0]=(rate[1]+rate[2])/2;  
-        amplitudes[0] = (amplitudes[1]+amplitudes[2])/2;
       }
 
       // Total the available beats
       word runningTotal = 0;
-      word runningAmp = 0;
       int maxIndex = min(beatCount, 10);      
       for(int i=0; i<maxIndex; i++) {
         runningTotal += rate[i];              
-        runningAmp += amplitudes[i];
       }
       runningTotal /= maxIndex;               // average the last 10 IBI values 
-      runningAmp /= maxIndex;
       BPM = 60000/runningTotal;               // how many beats can fit into a minute? that's BPM!
 
-      pulseLost = false;                      // Definitely have a valid pulse now
-      // If minimum average and last amplitude appropriate, relay data
-      if(runningAmp>50 && amplitude>50) {
-        postUpdate = true;
-      }
     }                       
   }
 
@@ -195,7 +189,12 @@ void PulseSensorAmpedClass::update() {              // Update this ever 2ms
     thresh = amplitude/2 + trough;            // Use 50% of the last amplitude as new threshold
     peak = thresh;                            // Peak won't update until beyond threshold
     trough = thresh;                          // Trough won't update until beyond threshold
-  }
+  
+    pulseLost = false;                      // Definitely have a valid pulse now
+    // If minimum average and last amplitude appropriate, relay data
+    if(amplitude>300)
+      postUpdate = true;
+   }
 
   if(elapsedTime > 2500) {                 // if 2.5S elapse without a valid beat
     if(!pulseLost) {                       // If it was good, notify the loss
@@ -203,10 +202,10 @@ void PulseSensorAmpedClass::update() {              // Update this ever 2ms
       postUpdate = true;
     }
     // Reset state variables to default state
-    thresh = 512;                          // set thresh default
-    peak = 512;                            // set P default
-    trough = 512;                          // set T default
-    lastBeatTime = sampleCounter;          // bring the lastBeatTime up to date        
+    thresh = trough + (peak-trough)/3;  // set thresh default
+    peak = signal;                   // set P default
+    trough = signal;                 // set T default
+    lastBeatTime = sampleCounter;    // bring the lastBeatTime up to date        
     pulseLost = true;
     beatCount = 0;
   }
@@ -217,7 +216,7 @@ void PulseSensorAmpedClass::process(void) {
   if(postUpdate) {
     if(BPM>=0)
       PulseSensorAmped_data(BPM, IBI);
-    else
+    else 
       PulseSensorAmped_lost();	         
     postUpdate = false;
   } 
